@@ -147,9 +147,8 @@ func TestSkillValidation_DescOverLimit(t *testing.T) {
 }
 
 // TestBootstrapFailurePropagates verifies that when the bootstrap script runner
-// returns an error, Run() propagates it as a failure.  The rule is appended to
-// cc.rules before bootstrap runs, so the error must surface via Run() rather than
-// being silently ignored.
+// returns an error, Run propagates it as a failure. The rule is not published
+// unless bootstrap succeeds.
 func TestBootstrapFailurePropagates(t *testing.T) {
 	t.Parallel()
 
@@ -159,18 +158,23 @@ func TestBootstrapFailurePropagates(t *testing.T) {
 	createBootstrapScript(t, dir, ".agents/rules/rule.md", "#!/bin/sh\nexit 1")
 
 	c := New(WithSearchPaths(dir))
-	// Replace the default runner with one that always fails
+	bootstrapErr := errors.New("simulated bootstrap failure") //nolint:err113
 	c.cmdRunner = func(_ *exec.Cmd) error {
-		return errors.New("simulated bootstrap failure") //nolint:err113
+		return bootstrapErr
 	}
 
 	_, err := c.Run(context.Background(), "task")
-	if err == nil {
-		t.Fatal("expected Run() to fail when bootstrap script errors")
+	if !errors.Is(err, bootstrapErr) {
+		t.Fatalf("Run() error = %v, want %v", err, bootstrapErr)
 	}
 
-	if !strings.Contains(err.Error(), "bootstrap") {
-		t.Errorf("expected bootstrap-related error message, got: %v", err)
+	var rfe *ruleFileError
+	if !errors.As(err, &rfe) {
+		t.Fatalf("Run() error type = %T, want *ruleFileError", err)
+	}
+
+	if filepath.Base(rfe.path) != "rule.md" {
+		t.Errorf("rule path = %q, want rule.md", rfe.path)
 	}
 }
 

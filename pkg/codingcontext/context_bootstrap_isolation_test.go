@@ -23,15 +23,16 @@ func bootstrapIsolationRuleNames(rules []markdown.Markdown[markdown.RuleFrontMat
 	for _, rule := range rules {
 		names = append(names, rule.FrontMatter.Name)
 	}
+
 	return names
 }
 
 func bootstrapIsolationRuleContent(
-	t *testing.T,
+	tb testing.TB,
 	rules []markdown.Markdown[markdown.RuleFrontMatter],
 	name string,
 ) string {
-	t.Helper()
+	tb.Helper()
 
 	for _, rule := range rules {
 		if rule.FrontMatter.Name == name {
@@ -39,15 +40,24 @@ func bootstrapIsolationRuleContent(
 		}
 	}
 
-	t.Fatalf("rule %q not found", name)
+	tb.Fatalf("rule %q not found", name)
+
 	return ""
 }
 
-func rewriteBootstrapIsolationRule(t *testing.T, path, name, content string) {
-	t.Helper()
+func rewriteBootstrapIsolationRule(tb testing.TB, path, name, content string) {
+	tb.Helper()
 
 	source := fmt.Sprintf("---\nname: %s\n---\n%s", name, content)
-	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
+	require.NoError(tb, os.WriteFile(path, []byte(source), 0o600))
+}
+
+func requireRuleFileError(tb testing.TB, err error, name string) {
+	tb.Helper()
+
+	var rfe *ruleFileError
+	require.ErrorAs(tb, err, &rfe)
+	require.Equal(tb, name, filepath.Base(rfe.path))
 }
 
 func TestRun_LenientBootstrapFailureSkipsOnlyFailingRule(t *testing.T) {
@@ -100,10 +110,6 @@ func TestRun_LenientBootstrapFailureSkipsOnlyFailingRule(t *testing.T) {
 		expectedTokens += tokencount.EstimateTokens(rule.Content)
 	}
 	require.Equal(t, expectedTokens, result.Tokens)
-	hypotheticalWithFailing := expectedTokens + tokencount.EstimateTokens("Failing content")
-	if tokencount.EstimateTokens("Failing content") > 0 {
-		require.NotEqual(t, hypotheticalWithFailing, result.Tokens)
-	}
 }
 
 func TestRun_StrictBootstrapFailureIsFatal(t *testing.T) {
@@ -134,7 +140,7 @@ func TestRun_StrictBootstrapFailureIsFatal(t *testing.T) {
 	result, err := cc.Run(context.Background(), "test-task")
 	require.Nil(t, result)
 	require.ErrorIs(t, err, bootstrapErr)
-	require.Contains(t, err.Error(), "02-failing.md")
+	requireRuleFileError(t, err, "02-failing.md")
 	require.Equal(t, []string{
 		"01-before-bootstrap",
 		"02-failing-bootstrap",
@@ -218,7 +224,7 @@ func TestRun_LenientRuleParseFailurePreservesEarlierRules(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"before"}, bootstrapIsolationRuleNames(result.Rules))
 	require.Equal(t, []string{"01-before-bootstrap"}, calls)
-	require.Contains(t, logs.String(), "skipping directory")
+	require.Contains(t, logs.String(), "stopping rule discovery after error")
 	require.Contains(t, logs.String(), "02-failing.md")
 	require.NotContains(t, result.Prompt, "After content")
 }
@@ -259,7 +265,7 @@ func TestRun_LenientRuleParseFailureDoesNotBlockLaterLenientSearchPath(t *testin
 	require.NotContains(t, result.Prompt, "Failing content")
 	require.NotContains(t, result.Prompt, "After content")
 	require.Contains(t, result.Prompt, "Target content")
-	require.Contains(t, logs.String(), "skipping directory")
+	require.Contains(t, logs.String(), "stopping rule discovery after error")
 	require.Contains(t, logs.String(), "02-failing.md")
 }
 
@@ -282,7 +288,7 @@ func TestRun_StrictRuleParseFailureIsFatalBeforeDirectoryBootstrap(t *testing.T)
 	result, err := cc.Run(context.Background(), "test-task")
 	require.Nil(t, result)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "02-failing.md")
+	requireRuleFileError(t, err, "02-failing.md")
 	require.Empty(t, calls)
 	require.Empty(t, cc.rules)
 }
