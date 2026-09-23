@@ -298,6 +298,24 @@ For each rule file `rule-name.md`, the CLI looks for `rule-name-bootstrap` in th
 ./jira-context-bootstrap                ← Wrong directory
 ```
 
+### Bootstrap failure handling
+
+Rule files are discovered and expanded for one rule directory before bootstrap
+scripts from that directory run. Bootstrap processing completes before discovery
+moves to the next rule directory, preserving search-path order.
+
+- **Strict search paths:** A rule bootstrap failure is fatal and `Run` returns an
+  error. Rules after the failing bootstrap are not published. A rule parse or
+  expansion error is also fatal and `Run` returns an error before any bootstrap
+  scripts from that directory run.
+- **Lenient search paths:** A rule bootstrap failure logs a warning, excludes only
+  the failing rule, and continues with later rules in the same directory.
+
+A rule parse or expansion error still stops discovery of the remainder of that
+directory. On a lenient path, rules discovered before that error remain eligible
+for bootstrap and publication, and processing continues with the next rule
+directory or search path.
+
 ## Working Directory
 
 The `-C` option changes the working directory, which is automatically added to the search paths:
