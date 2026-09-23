@@ -144,6 +144,13 @@ func nameFromPath(path string) string {
 
 type markdownVisitor func(path string, fm *markdown.BaseFrontMatter) error
 
+type pendingRule struct {
+	path   string
+	rule   markdown.Markdown[markdown.RuleFrontMatter]
+	reason string
+	tokens int
+}
+
 // Run executes the context assembly for the given taskName and returns the assembled result.
 // The taskName is looked up in task search paths and its content is parsed into blocks.
 // If the taskName cannot be found as a task file, an error is returned.
@@ -804,7 +811,6 @@ func (cc *Context) cleanupDownloadedDirectories() {
 }
 
 func (cc *Context) findExecuteRuleFiles(ctx context.Context) error {
-	// Skip rule file discovery if bootstrap is disabled
 	if !cc.doBootstrap {
 		return nil
 	}
@@ -813,51 +819,104 @@ func (cc *Context) findExecuteRuleFiles(ctx context.Context) error {
 		return namespacedRuleSearchPaths(dir, cc.namespace)
 	}
 
-	err := cc.visitMarkdownFiles(namespacedRulePaths, func(path string, baseFm *markdown.BaseFrontMatter) error {
-		var frontmatter markdown.RuleFrontMatter
+	for _, sp := range cc.downloadedPaths {
+		for _, dir := range namespacedRulePaths(sp.Path) {
+			var pending []pendingRule
 
-		md, err := markdown.ParseMarkdownFileWithLogger(path, &frontmatter, cc.logger)
-		if err != nil {
-			return fmt.Errorf("failed to parse markdown file %s: %w", path, err)
-		}
+			discoveryErr := cc.visitMarkdownInDir(dir, func(path string, baseFm *markdown.BaseFrontMatter) error {
+				rule, err := cc.discoverPendingRule(path, baseFm)
+				if err != nil {
+					return err
+				}
 
-		if cc.lintCollector != nil {
-			cc.lintCollector.recordFile(path, LoadedFileKindRule)
-		}
+				pending = append(pending, rule)
+				return nil
+			})
 
-		if frontmatter.Name == "" {
-			frontmatter.Name = nameFromPath(path)
-		}
-
-		// Expand parameters only if expand is not explicitly set to false
-		var processedContent string
-		if shouldExpandParams(frontmatter.ExpandParams) {
-			processedContent, err = cc.expandParams(md.Content, nil)
-			if err != nil {
-				return fmt.Errorf("failed to expand parameters in file %s: %w", path, err)
+			if discoveryErr != nil && !sp.Lenient {
+				return fmt.Errorf("failed to find and execute rule files: %w", discoveryErr)
 			}
-		} else {
-			processedContent = md.Content
+
+			if err := cc.bootstrapAndPublishRules(ctx, pending, sp.Lenient); err != nil {
+				return fmt.Errorf("failed to find and execute rule files: %w", err)
+			}
+
+			if discoveryErr != nil {
+				cc.logger.Warn("skipping directory", "path", dir, "error", discoveryErr)
+			}
 		}
+	}
 
-		tokens := tokencount.EstimateTokens(processedContent)
+	return nil
+}
 
-		cc.rules = append(cc.rules, markdown.FromContent(frontmatter, processedContent))
+func (cc *Context) discoverPendingRule(
+	path string,
+	baseFm *markdown.BaseFrontMatter,
+) (pendingRule, error) {
+	var frontmatter markdown.RuleFrontMatter
 
-		cc.totalTokens += tokens
-
-		// Get match reason to explain why this rule was included
-		_, reason := cc.includes.MatchesIncludes(*baseFm, cc.includeByDefault)
-		cc.logger.Info("Including rule file", "path", path, "reason", reason, "tokens", tokens)
-
-		if err := cc.runBootstrapScript(ctx, path, frontmatter.Bootstrap); err != nil {
-			return fmt.Errorf("failed to run bootstrap script: %w", err)
-		}
-
-		return nil
-	})
+	md, err := markdown.ParseMarkdownFileWithLogger(path, &frontmatter, cc.logger)
 	if err != nil {
-		return fmt.Errorf("failed to find and execute rule files: %w", err)
+		return pendingRule{}, fmt.Errorf("failed to parse markdown file %s: %w", path, err)
+	}
+
+	if cc.lintCollector != nil {
+		cc.lintCollector.recordFile(path, LoadedFileKindRule)
+	}
+
+	if frontmatter.Name == "" {
+		frontmatter.Name = nameFromPath(path)
+	}
+
+	var processedContent string
+	if shouldExpandParams(frontmatter.ExpandParams) {
+		processedContent, err = cc.expandParams(md.Content, nil)
+		if err != nil {
+			return pendingRule{}, fmt.Errorf("failed to expand parameters in file %s: %w", path, err)
+		}
+	} else {
+		processedContent = md.Content
+	}
+
+	tokens := tokencount.EstimateTokens(processedContent)
+	_, reason := cc.includes.MatchesIncludes(*baseFm, cc.includeByDefault)
+
+	return pendingRule{
+		path:   path,
+		rule:   markdown.FromContent(frontmatter, processedContent),
+		reason: reason,
+		tokens: tokens,
+	}, nil
+}
+
+func (cc *Context) bootstrapAndPublishRules(
+	ctx context.Context,
+	pending []pendingRule,
+	lenient bool,
+) error {
+	for _, rule := range pending {
+		if err := cc.runBootstrapScript(ctx, rule.path, rule.rule.FrontMatter.Bootstrap); err != nil {
+			if lenient {
+				cc.logger.Warn(
+					"skipping rule file after bootstrap failure",
+					"path", rule.path,
+					"error", err,
+				)
+				continue
+			}
+
+			return fmt.Errorf("failed to run bootstrap script for rule %s: %w", rule.path, err)
+		}
+
+		cc.rules = append(cc.rules, rule.rule)
+		cc.totalTokens += rule.tokens
+		cc.logger.Info(
+			"Including rule file",
+			"path", rule.path,
+			"reason", rule.reason,
+			"tokens", rule.tokens,
+		)
 	}
 
 	return nil
